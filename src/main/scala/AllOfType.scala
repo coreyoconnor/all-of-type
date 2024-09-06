@@ -6,9 +6,21 @@ import scala.annotation.experimental
 
 object AllOfType {
   val derive: Nothing =
-    throw new UninitializedFieldError("Apply the @AllOfType annotation to containing class/object")
+    throw new NotImplementedError("Apply the @AllOfType annotation to containing class/object")
 }
 
+/** EG:
+  * ```scala
+  * @AllOfType
+  * object Foo {
+  *   val x: String = "ASDAS"
+  *   val y = "ASDAS"
+  *   val all: Seq[String] = AllOfType.derive
+  * }
+  * ```
+  *
+  * Will result in the `all` value equal to `Seq(x, y)`.
+  */
 @experimental
 class AllOfType extends MacroAnnotation {
 
@@ -18,44 +30,17 @@ class AllOfType extends MacroAnnotation {
   ): List[quotes.reflect.Definition] = {
     import quotes.reflect.*
 
-    sealed trait StmtAction
-    case class Pass(stmt: Statement) extends StmtAction
-    case class SeqToBuild(valDef: ValDef, innerType: Type[?]) extends StmtAction
-    case class ValToInclude(valDef: ValDef, valType: Type[?]) extends StmtAction
-
     def updateBody(body: List[Statement]): List[Statement] = {
+      val allSeqs = collectAllSeqsToBuild(body)
 
-      val actions = body map {
-        case valDef@ValDef(_, valType, Some(valImpl)) =>
-          valType.tpe.asType match {
-            case '[Seq[innerType]] => {
-              valImpl.asExpr match {
-                case '{AllOfType.derive} => SeqToBuild(valDef, Type.of[innerType])
-                case stmt => Pass(valDef)
-              }
-            }
-            case tpe => ValToInclude(valDef, tpe)
-          }
-        case stmt => Pass(stmt)
-      }
+      val mapToTargets = buildMapToTargets(body, allSeqs)
 
-      val allSeqs = actions.collect { case SeqToBuild(seqDef, innerType) =>
-        val targetSymbols = actions.collect {
-          case ValToInclude(valDef, targetType)
-            if TypeRepr.of(using targetType) <:< TypeRepr.of(using innerType) => valDef.symbol
+      body map {
+        case maybeAllSeq: ValDef => mapToTargets.get(maybeAllSeq.symbol) match {
+          case None => maybeAllSeq
+          case Some(targetVals) => replacementImpl(maybeAllSeq, targetVals)
         }
-
-        val targetRefs = Varargs(targetSymbols.map(Ref(_).asExpr))
-        val targetRefSeqs = '{ Seq($targetRefs) }.asTerm
-
-        seqDef.symbol -> ValDef.copy(seqDef)(seqDef.name, seqDef.tpt, Some(targetRefSeqs))
-      }.toMap
-
-      body map { stmt =>
-        allSeqs.get(stmt.symbol) match {
-          case Some(replacement) => replacement
-          case None => stmt
-        }
+        case stmt => stmt
       }
     }
 
@@ -65,6 +50,76 @@ class AllOfType extends MacroAnnotation {
     }
 
     List(Some(updatedDef), companion).flatten
+  }
+
+/**
+  * Replacement implementation for a derived "all" sequence.
+  *
+  * @param quotes
+  * @param allSeq
+  * @param targetVals
+  * @return
+  */
+  private def replacementImpl(using quotes: Quotes)(
+    allSeq: quotes.reflect.ValDef,
+    targetVals: List[quotes.reflect.Symbol]
+  ): quotes.reflect.ValDef = {
+    import quotes.reflect.*
+
+    val targetRefArgs = Varargs(targetVals.map(Ref(_).asExpr))
+    val replacement = '{Seq($targetRefArgs)}.asTerm
+    ValDef.copy(allSeq)(allSeq.name, allSeq.tpt, Some(replacement))
+  }
+
+/**
+  * Map from an "all" sequence symbol to the type of `val`s that should be included.
+  *
+  * @param quotes
+  * @param body
+  * @return
+  */
+  private def collectAllSeqsToBuild(using quotes: Quotes)(
+    body: List[quotes.reflect.Statement]
+  ): Map[quotes.reflect.Symbol, Type[?]] = {
+    import quotes.reflect.*
+
+    body.flatMap {
+      case valDef@ValDef(_, valType, Some(valImpl)) =>
+        (valType.tpe.asType -> valImpl.asExpr) match {
+          case ('[Seq[innerType]], '{AllOfType.derive}) => Some(valDef.symbol -> Type.of[innerType])
+          case _ => None
+        }
+      case _ => None
+    }.toMap
+  }
+
+/**
+  * Map from an "all" `Seq` to the `val`s to include.
+  *
+  * @param quotes
+  * @param body
+  * @param allSeqs
+  * @return
+  */
+  private def buildMapToTargets(using quotes: Quotes)(
+    body: List[quotes.reflect.Statement],
+    allSeqs: Map[quotes.reflect.Symbol, Type[?]]
+  ): Map[quotes.reflect.Symbol, List[quotes.reflect.Symbol]] = {
+    import quotes.reflect.*
+
+    def ignore = allSeqs.keySet
+
+    body.collect {
+        case valDef: ValDef if !ignore.contains(valDef.symbol) => valDef
+    }.flatMap { possibleTarget =>
+      val valType = possibleTarget.tpt.tpe.asType
+
+      allSeqs.collect {
+        case (allSeq, targetType)
+          if TypeRepr.of(using targetType) <:< TypeRepr.of(using valType)
+            => allSeq -> possibleTarget.symbol
+      }
+    }.groupMap(_._1)(_._2)
   }
 }
 
