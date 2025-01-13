@@ -66,8 +66,7 @@ class AllOfType extends MacroAnnotation {
   ): quotes.reflect.ValDef = {
     import quotes.reflect.*
 
-    val targetRefArgs = Varargs(targetVals.map(Ref(_).asExpr))
-    val replacement = '{Seq($targetRefArgs)}.asTerm
+    val replacement = Expr.ofSeq(targetVals.map(Ref(_).asExpr)).asTerm
     ValDef.copy(allSeq)(allSeq.name, allSeq.tpt, Some(replacement))
   }
 
